@@ -291,6 +291,11 @@
           <label>Consumo semanal (litros)</label>
           <input type="text" inputmode="decimal" id="litros" value="" placeholder="0">
         </div>
+        <div class="field full">
+          <label>Nombre de quien cotiza</label>
+          <input type="text" id="nombreCotiza" placeholder="Tu nombre">
+          <p class="hint">Se recuerda automáticamente en este navegador. Se usa solo para el registro en Sheets.</p>
+        </div>
       </div>
     </div>
 
@@ -370,6 +375,13 @@
 
       <button class="btn btn-primary" onclick="generarPDFCliente()">Descargar cotización (cliente) — PDF</button>
       <button class="btn btn-secondary" onclick="generarPDFInterno()">Descargar reporte interno (pago) — PDF</button>
+
+      <div style="margin-top:16px;padding-top:14px;border-top:1px dashed var(--line);">
+        <label>URL de registro (Google Sheets)</label>
+        <input type="text" id="urlRegistro" placeholder="https://script.google.com/macros/s/AKfycb.../exec">
+        <button class="btn btn-secondary" id="btnRegistrar" onclick="registrarCotizacion()" style="margin-top:8px;">📊 Registrar esta cotización</button>
+        <p class="hint">Envía los datos de esta cotización a tu hoja de Google. La liga solo se captura una vez; queda guardada en este navegador.</p>
+      </div>
 
       <details class="internal">
         <summary>Vista previa — solo uso interno</summary>
@@ -595,7 +607,7 @@ function sincronizarTarifasCliente(){
 });
 
 // --- Persistencia ---
-const CAMPOS_ESTABLES = ['cesac','margenHidromex','aeropuerto'];
+const CAMPOS_ESTABLES = ['cesac','margenHidromex','aeropuerto','urlRegistro','nombreCotiza'];
 const TODOS_LOS_CAMPOS = ['cliente','fechaCotizacion','aeropuerto','vigDesde','vigHasta','litros',
   'molecula','almacenamiento','expendio','cesac',
   'moleculaCliente','almacenamientoCliente','expendioCliente','cesacCliente','margenHidromex'];
@@ -964,6 +976,88 @@ function pdfHeader(doc, subtitulo){
   doc.text(fmt(num('litros'),0)+' LITROS', 320, infoY+59);
 
   return infoY+78;
+}
+
+function generarIdCotizacion(){
+  const d = new Date();
+  const pad = n=>String(n).padStart(2,'0');
+  const rand = Math.random().toString(36).slice(2,6).toUpperCase();
+  return `COT-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}-${rand}`;
+}
+
+function filaBaseRegistro(){
+  return {
+    idCotizacion:'', tipoRegistro:'', fechaCotizacion:'', vigDesde:'', vigHasta:'',
+    nombreCotiza:'', cliente:'', aeropuerto:'', litros:'',
+    moleculaASA:'', almacenamientoASA:'', expendioASA:'', cesacASA:'',
+    moleculaCliente:'', almacenamientoCliente:'', expendioCliente:'', cesacCliente:'',
+    comisionista:'', tarifaComisionista:'', montoComisionFila:'',
+    montoTotalOperacion:'', montoASAReal:'', montoComisionistasTotal:'', montoHidromexReal:'',
+    margenTotal:'', margenNeto:'',
+  };
+}
+
+async function registrarCotizacion(){
+  const url = document.getElementById('urlRegistro').value.trim();
+  if(!url){ alert('Primero captura la URL de registro (Google Apps Script) en el campo de arriba.'); return; }
+  if(num('litros')<=0){ alert('Captura el consumo semanal en litros antes de registrar.'); return; }
+
+  const d = calcular();
+  const idCotizacion = generarIdCotizacion();
+  const fecha = fechaFmt('fechaCotizacion');
+  const vigDesde = fechaFmt('vigDesde');
+  const vigHasta = fechaFmt('vigHasta');
+
+  const filaPrincipal = {
+    ...filaBaseRegistro(),
+    idCotizacion, tipoRegistro:'Cotización',
+    fechaCotizacion: fecha, vigDesde, vigHasta,
+    nombreCotiza: document.getElementById('nombreCotiza').value.trim(),
+    cliente: document.getElementById('cliente').value,
+    aeropuerto: airportLabel(),
+    litros: d.litros,
+    moleculaASA: d.molecula, almacenamientoASA: d.almacenamiento, expendioASA: d.expendio, cesacASA: d.cesac,
+    moleculaCliente: d.moleculaCliente, almacenamientoCliente: d.almacenamientoCliente,
+    expendioCliente: d.expendioCliente, cesacCliente: d.cesacCliente,
+    montoTotalOperacion: d.totalOperacion.toFixed(2),
+    montoASAReal: d.totalASA.toFixed(2),
+    montoComisionistasTotal: d.totalComision.toFixed(2),
+    montoHidromexReal: d.totalMargenNetoReal.toFixed(2),
+    margenTotal: d.margenHidromex.toFixed(5),
+    margenNeto: d.margenNetoReal.toFixed(5),
+  };
+
+  const filasComisionistas = d.comisionesDetalle.map(c => ({
+    ...filaBaseRegistro(),
+    idCotizacion, tipoRegistro:'Comisionista',
+    fechaCotizacion: fecha, vigDesde, vigHasta,
+    comisionista: c.nombre,
+    tarifaComisionista: c.tasa.toFixed(5),
+    montoComisionFila: (c.tasa*d.litros*1.16).toFixed(2),
+  }));
+
+  const filas = [filaPrincipal, ...filasComisionistas];
+
+  const boton = document.getElementById('btnRegistrar');
+  const textoOriginal = boton.textContent;
+  boton.textContent = 'Enviando...';
+  boton.disabled = true;
+
+  try{
+    // mode:'no-cors' es necesario para Apps Script; no permite leer la respuesta,
+    // pero el envío sí llega y se procesa del lado de Google.
+    await fetch(url, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: {'Content-Type': 'text/plain;charset=utf-8'},
+      body: JSON.stringify({filas}),
+    });
+    boton.textContent = `✓ Enviado (${filas.length} fila${filas.length>1?'s':''}) — revisa tu hoja`;
+  }catch(err){
+    boton.textContent = 'Error al enviar';
+    alert('No se pudo enviar. Revisa tu conexión a internet o que la URL de registro sea correcta.');
+  }
+  setTimeout(()=>{ boton.textContent = textoOriginal; boton.disabled = false; }, 3500);
 }
 
 function generarPDFCliente(){
